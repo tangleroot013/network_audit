@@ -5,6 +5,8 @@
     sudo netaudit --plain         one-shot text report
     sudo netaudit --json          one-shot JSON report
     sudo netaudit --export FMTS   export json,md,txt,html,csv,bundle [--out DIR]
+    netaudit --check 'routes,interfaces' --json   run selected checks only
+    netaudit --compare report.json                 compare with prior report
     netaudit --selftest           parser/export self-test (no root or network)
 
 Flags: --offline, --no-redact, --readonly, --name HOST.
@@ -382,6 +384,79 @@ def check_routes(ctx):
             data,
         )
     return "OK", f"1.1.1.1 via {eff_dev}", detail, data
+
+
+def parse_interface_stats(output):
+    links = json.loads(output)
+    if not isinstance(links, list):
+        raise ValueError("expected a JSON list of interfaces")
+
+    interfaces = []
+    for link in links:
+        if not isinstance(link, dict) or not link.get("ifname"):
+            continue
+        stats = link.get("stats64") or link.get("stats") or {}
+        if not isinstance(stats, dict):
+            stats = {}
+        rx = stats.get("rx") or {}
+        tx = stats.get("tx") or {}
+        if not isinstance(rx, dict):
+            rx = {}
+        if not isinstance(tx, dict):
+            tx = {}
+        interfaces.append(
+            {
+                "name": link["ifname"],
+                "state": link.get("operstate", "UNKNOWN"),
+                "mtu": link.get("mtu"),
+                "rx_errors": rx.get("errors", 0),
+                "tx_errors": tx.get("errors", 0),
+                "rx_dropped": rx.get("dropped", 0),
+                "tx_dropped": tx.get("dropped", 0),
+            }
+        )
+    return interfaces
+
+
+def check_interfaces(ctx):
+    rc, output = sh(["ip", "-j", "-s", "link", "show"])
+    if rc == 127:
+        return "SKIP", "ip not installed", output, {}
+    if rc != 0:
+        return "SKIP", "ip interface statistics unavailable", output, {}
+    try:
+        interfaces = parse_interface_stats(output)
+    except (json.JSONDecodeError, ValueError, TypeError) as error:
+        return "WARN", "could not parse interface statistics", str(error), {}
+
+    details = [
+        f"{item['name']}: {item['state']} mtu={item['mtu']} "
+        f"rx errors={item['rx_errors']} dropped={item['rx_dropped']} "
+        f"tx errors={item['tx_errors']} dropped={item['tx_dropped']}"
+        for item in interfaces
+    ]
+    affected = [
+        item
+        for item in interfaces
+        if any(
+            item[key]
+            for key in ("rx_errors", "tx_errors", "rx_dropped", "tx_dropped")
+        )
+    ]
+    data = {"interfaces": interfaces, "affected": len(affected)}
+    if affected:
+        return (
+            "WARN",
+            f"{len(affected)}/{len(interfaces)} interfaces have accumulated errors or drops",
+            "\n".join(details),
+            data,
+        )
+    return (
+        "INFO",
+        f"{len(interfaces)} interfaces; no recorded RX/TX errors or drops",
+        "\n".join(details),
+        data,
+    )
 
 
 def check_gateway(ctx):
@@ -899,6 +974,7 @@ def check_timeline(ctx):
 CHECKS = {
     "system": ("System", check_system),
     "routes": ("Routing", check_routes),
+    "interfaces": ("Interface health", check_interfaces),
     "gateway": ("Gateway", check_gateway),
     "icmp": ("Internet ping", check_icmp),
     "resolv": ("resolv.conf", check_resolv),
@@ -915,6 +991,7 @@ CHECKS = {
 CHECK_HINTS = {
     "system": "Use this to confirm OS, user identity, and available root access.",
     "routes": "Compare the effective route with the interface you expect to carry traffic.",
+    "interfaces": "Inspect link state, MTU, and accumulated receive/transmit errors or drops.",
     "gateway": "If it fails, verify the eth0 gateway and local network before changing VPN settings.",
     "icmp": "Ping can be filtered; compare with TCP egress before concluding the internet is down.",
     "resolv": "A missing or dangling resolver file can break DNS even when routes are healthy.",
@@ -1141,6 +1218,8 @@ def fmt_txt(rep):
     o += [f"  [{d['severity']}] {d['finding']}" for d in rep["diagnosis"]] or [
         "  no problems detected"
     ]
+    if rep.get("comparison"):
+        o += ["", "BASELINE COMPARISON"] + comparison_lines(rep)
     o += ["", "CHECKS"] + [
         f"  [{c['status']:<4}] {c['title']:<16} {c['summary']}"
         for c in rep["checks"]
@@ -1167,6 +1246,9 @@ def fmt_md(rep):
     o += [
         f"- **{d['severity']}** {d['finding']}" for d in rep["diagnosis"]
     ] or ["- no problems detected"]
+    if rep.get("comparison"):
+        o += ["", "## Baseline comparison"]
+        o += [f"- {line}" for line in comparison_lines(rep)]
     o += ["", "## Checks", "| status | check | summary |", "|---|---|---|"]
     o += [
         f"| {c['status']} | {c['title']} | {c['summary'].replace('|', '/')} |"
@@ -1202,7 +1284,12 @@ def fmt_html(rep):
         f"<li style='color:{col[d['severity']]}'><b>{d['severity']}</b> {e(d['finding'])}</li>"
         for d in rep["diagnosis"]
     ] or ["<li>no problems detected</li>"]
-    o += ["</ul><h2>Checks</h2><table border=1 cellpadding=4 cellspacing=0>"]
+    o += ["</ul>"]
+    if rep.get("comparison"):
+        o += ["<h2>Baseline comparison</h2><ul>"]
+        o += [f"<li>{e(line)}</li>" for line in comparison_lines(rep)]
+        o += ["</ul>"]
+    o += ["<h2>Checks</h2><table border=1 cellpadding=4 cellspacing=0>"]
     o += [
         f"<tr><td style='color:{col[c['status']]}'><b>{c['status']}</b></td><td>{e(c['title'])}</td>"
         f"<td>{e(c['summary'])}</td></tr>"
@@ -1241,8 +1328,7 @@ FORMATS = {
 }
 
 
-def expand_format_patterns(patterns):
-    available = [*FORMATS, "bundle"]
+def expand_patterns(patterns, available):
     selected = []
     unmatched = []
     for pattern in patterns:
@@ -1255,6 +1341,106 @@ def expand_format_patterns(patterns):
             if name not in selected:
                 selected.append(name)
     return selected, unmatched
+
+
+def expand_format_patterns(patterns):
+    return expand_patterns(patterns, [*FORMATS, "bundle"])
+
+
+def expand_check_patterns(patterns):
+    return expand_patterns(patterns, list(CHECKS))
+
+
+def compare_reports(current, baseline):
+    def checks_by_id(report):
+        return {
+            check["id"]: check
+            for check in report.get("checks", [])
+            if isinstance(check, dict) and isinstance(check.get("id"), str)
+        }
+
+    current_checks = checks_by_id(current)
+    baseline_checks = checks_by_id(baseline)
+    status_changes = []
+    for check_id, current_check in current_checks.items():
+        baseline_check = baseline_checks.get(check_id)
+        if baseline_check and baseline_check.get(
+            "status"
+        ) != current_check.get("status"):
+            status_changes.append(
+                {
+                    "id": check_id,
+                    "title": current_check.get("title", check_id),
+                    "from": baseline_check.get("status"),
+                    "to": current_check.get("status"),
+                }
+            )
+
+    route_changes = {}
+    current_routes = current_checks.get("routes", {}).get("data", {})
+    baseline_routes = baseline_checks.get("routes", {}).get("data", {})
+    if "routes" in current_checks and "routes" in baseline_checks:
+        for field in ("eff_dev", "defaults", "split_wg", "unreachable"):
+            before = baseline_routes.get(field)
+            after = current_routes.get(field)
+            if before != after:
+                route_changes[field] = {"from": before, "to": after}
+
+    return {
+        "baseline_generated": baseline.get("generated"),
+        "status_changes": status_changes,
+        "added_checks": [
+            check_id
+            for check_id in current_checks
+            if check_id not in baseline_checks
+        ],
+        "route_changes": route_changes,
+    }
+
+
+def load_baseline(path):
+    with open(path, encoding="utf-8") as baseline_file:
+        baseline = json.load(baseline_file)
+    if not isinstance(baseline, dict) or not isinstance(
+        baseline.get("checks"), list
+    ):
+        raise ValueError(
+            "expected a netaudit report object with a checks list"
+        )
+    if any(
+        not isinstance(check, dict) or not isinstance(check.get("id"), str)
+        for check in baseline["checks"]
+    ):
+        raise ValueError("baseline checks must be objects with string IDs")
+    if any(
+        "data" in check and not isinstance(check["data"], dict)
+        for check in baseline["checks"]
+    ):
+        raise ValueError("baseline check data must be objects")
+    return baseline
+
+
+def comparison_lines(report):
+    comparison = report.get("comparison")
+    if not comparison:
+        return []
+    lines = [
+        f"Baseline generated: {comparison.get('baseline_generated') or 'unknown'}"
+    ]
+    changes = comparison.get("status_changes", [])
+    if changes:
+        lines.extend(
+            f"{item['title']}: {item['from']} -> {item['to']}"
+            for item in changes
+        )
+    else:
+        lines.append("No check status changes.")
+    for field, values in comparison.get("route_changes", {}).items():
+        lines.append(f"Route {field}: {values['from']} -> {values['to']}")
+    added = comparison.get("added_checks", [])
+    if added:
+        lines.append("New checks: " + ", ".join(added))
+    return lines
 
 
 def export(rep, fmts, ctx, outdir=None):
@@ -2054,6 +2240,27 @@ def selftest():
         == {"tx": 2, "rx": 2, "loss": 0.0, "avg": 2.5},
     )
     t("every check has an inline hint", set(CHECK_HINTS) == set(CHECKS))
+    interface_fixture = json.dumps(
+        [
+            {
+                "ifname": "eth0",
+                "operstate": "UP",
+                "mtu": 1500,
+                "stats64": {
+                    "rx": {"errors": 2, "dropped": 3},
+                    "tx": {"errors": 1, "dropped": 0},
+                },
+            }
+        ]
+    )
+    interface_stats = parse_interface_stats(interface_fixture)
+    t(
+        "interface parser reads link counters",
+        interface_stats[0]["name"] == "eth0"
+        and interface_stats[0]["mtu"] == 1500
+        and interface_stats[0]["rx_dropped"] == 3
+        and interface_stats[0]["tx_errors"] == 1,
+    )
     t(
         "format wildcard selects matching formats",
         expand_format_patterns(["j*", "bundle"]) == (["json", "bundle"], []),
@@ -2066,6 +2273,66 @@ def selftest():
         "unmatched format wildcard is reported",
         expand_format_patterns(["no-such-format*"])
         == ([], ["no-such-format*"]),
+    )
+    t(
+        "check wildcard selects only matching IDs",
+        expand_check_patterns(["rout*", "interfaces"])
+        == (["routes", "interfaces"], []),
+    )
+    baseline_report = {
+        "generated": "baseline-time",
+        "checks": [
+            {
+                "id": "routes",
+                "title": "Routing",
+                "status": "OK",
+                "data": {
+                    "eff_dev": "eth0",
+                    "defaults": [{"via": "192.0.2.1"}],
+                    "split_wg": False,
+                    "unreachable": False,
+                },
+            }
+        ],
+    }
+    current_report = {
+        "checks": [
+            {
+                "id": "routes",
+                "title": "Routing",
+                "status": "WARN",
+                "data": {
+                    "eff_dev": "wg0",
+                    "defaults": [{"via": "192.0.2.1"}],
+                    "split_wg": False,
+                    "unreachable": False,
+                },
+            },
+            {
+                "id": "interfaces",
+                "title": "Interface health",
+                "status": "INFO",
+            },
+        ]
+    }
+    comparison = compare_reports(current_report, baseline_report)
+    t(
+        "baseline comparison finds status and route changes",
+        comparison["status_changes"][0]["from"] == "OK"
+        and comparison["status_changes"][0]["to"] == "WARN"
+        and comparison["route_changes"]["eff_dev"]
+        == {"from": "eth0", "to": "wg0"},
+    )
+    t(
+        "baseline comparison identifies added checks",
+        comparison["added_checks"] == ["interfaces"],
+    )
+    t(
+        "comparison summary includes route change",
+        any(
+            "Route eff_dev: eth0 -> wg0" in line
+            for line in comparison_lines({"comparison": comparison})
+        ),
     )
 
     class ChunkedSocket:
@@ -2113,6 +2380,13 @@ def selftest():
         in ("refused", "timeout"),
     )
     with tempfile.TemporaryDirectory() as td:
+        baseline_path = os.path.join(td, "baseline.json")
+        with open(baseline_path, "w", encoding="utf-8") as baseline_file:
+            json.dump(baseline_report, baseline_file)
+        t(
+            "baseline JSON loads",
+            load_baseline(baseline_path)["generated"] == "baseline-time",
+        )
         p = os.path.join(td, "w.conf")
         open(p, "w").write(
             "[Interface]\nPrivateKey = SECRETKEY\nAddress = 10.1.2.3/32\nTable = off\nPostUp = true\n"
@@ -2233,6 +2507,16 @@ def main():
         metavar="FMTS",
         help="comma list or quoted wildcards: json,md,txt,html,csv,bundle,*",
     )
+    ap.add_argument(
+        "--check",
+        metavar="IDS",
+        help="run selected check IDs/patterns, e.g. routes,interfaces or 'dns*'",
+    )
+    ap.add_argument(
+        "--compare",
+        metavar="REPORT.json",
+        help="compare this audit with a previous netaudit JSON report",
+    )
     ap.add_argument("--out", metavar="DIR", help="export directory")
     ap.add_argument(
         "--offline", action="store_true", help="no external HTTPS request"
@@ -2253,13 +2537,42 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         return selftest()
+    check_ids = list(CHECKS)
+    if a.check is not None:
+        patterns = [
+            item.strip() for item in a.check.split(",") if item.strip()
+        ]
+        check_ids, bad = expand_check_patterns(patterns)
+        if not patterns or bad:
+            invalid = bad or [a.check]
+            print(
+                f"[error] unknown check pattern(s): {', '.join(invalid)}",
+                file=sys.stderr,
+            )
+            return 2
+    baseline = None
+    if a.compare:
+        try:
+            baseline = load_baseline(a.compare)
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            print(f"[error] cannot read baseline: {error}", file=sys.stderr)
+            return 2
     ctx = Ctx(a.name, a.offline, not a.no_redact, a.readonly)
-    headless = a.plain or a.json or a.export or not sys.stdout.isatty()
+    headless = (
+        a.plain
+        or a.json
+        or a.export
+        or a.check is not None
+        or a.compare
+        or not sys.stdout.isatty()
+    )
     audit = Audit(ctx)
     if headless:
-        audit.start()
+        audit.start(check_ids)
         audit.wait()
         rep = audit.report()
+        if baseline is not None:
+            rep["comparison"] = compare_reports(rep, baseline)
         if a.export:
             patterns = [x.strip() for x in a.export.split(",") if x.strip()]
             fm, bad = expand_format_patterns(patterns)

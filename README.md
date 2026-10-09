@@ -29,11 +29,18 @@ created with mode `0600`; the folder includes a SHA-256 manifest.
 ```sh
 python3 netaudit.py --plain --offline
 python3 netaudit.py --json --offline
+python3 netaudit.py --check 'routes,interfaces' --json --offline
 python3 netaudit.py --export json,md,csv,bundle --out ./audit-report --offline
 python3 netaudit.py --export 'j*,csv' --out ./audit-report --offline
 python3 netaudit.py --export '*' --out ./all-formats --offline
+python3 netaudit.py --compare ./audit-report/report.json --offline
 python3 netaudit.py --selftest
 ```
+
+`--check` accepts comma-separated check IDs or quoted wildcard patterns and
+runs only the selected checks. The interface health check reports link state,
+MTU, and accumulated RX/TX errors and drops. `--compare` reads a previous
+netaudit JSON report and adds status and route changes to the current report.
 
 Export patterns match format names (`json`, `md`, `txt`, `html`, `csv`,
 `bundle`) and support standard shell-style `*`, `?`, and character classes.
