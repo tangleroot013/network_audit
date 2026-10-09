@@ -20,9 +20,9 @@ The interactive flow is: wait for checks to finish, select a check and press
 Enter to inspect its evidence, press `d` for diagnosis, and `e` to export. In
 the export screen, toggle formats with `j` (JSON), `m` (Markdown), `t` (text),
 `h` (HTML), `c` (CSV), or `b` (bundle). Press `a` to select all, `n` to clear,
-`o` to choose an output folder, then Enter to write. Leave the folder blank to
-use `~/netaudit_reports/<timestamp>/`. Files are created with mode `0600`; the
-folder includes a SHA-256 manifest.
+or `*` to select all, `o` to choose an output folder, then Enter to write.
+Leave the folder blank to use `~/netaudit_reports/<timestamp>/`. Files are
+created with mode `0600`; the folder includes a SHA-256 manifest.
 
 ## Command Line
 
@@ -30,8 +30,15 @@ folder includes a SHA-256 manifest.
 python3 netaudit.py --plain --offline
 python3 netaudit.py --json --offline
 python3 netaudit.py --export json,md,csv,bundle --out ./audit-report --offline
+python3 netaudit.py --export 'j*,csv' --out ./audit-report --offline
+python3 netaudit.py --export '*' --out ./all-formats --offline
 python3 netaudit.py --selftest
 ```
+
+Export patterns match format names (`json`, `md`, `txt`, `html`, `csv`,
+`bundle`) and support standard shell-style `*`, `?`, and character classes.
+Quote patterns so the shell does not expand them against files in the current
+directory.
 
 `--offline` skips the external HTTPS status request; other checks may still
 make network requests. `--name HOST` selects the hostname used for DNS checks.
