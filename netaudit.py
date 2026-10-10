@@ -160,9 +160,7 @@ class Ctx:
                 if m:
                     try:
                         gw = str(
-                            ipaddress.ip_interface(
-                                m.group(1)
-                            ).network.network_address
+                            ipaddress.ip_interface(m.group(1)).network.network_address
                             + 1
                         )
                     except ValueError:
@@ -234,9 +232,7 @@ def parse_wg_conf(path):
     for p in peers:
         p.pop("presharedkey", None)
     d.update(own_pub=own, interface=iface, peers=peers)
-    d["peer_is_own_key"] = bool(own) and any(
-        p.get("publickey") == own for p in peers
-    )
+    d["peer_is_own_key"] = bool(own) and any(p.get("publickey") == own for p in peers)
     d["table_off"] = iface.get("table", "").lower() == "off"
     d["has_postup"] = "postup" in iface
     ep = peers[0].get("endpoint", "") if peers else ""
@@ -270,9 +266,7 @@ def recv_exact(sock, size):
     while len(data) < size:
         chunk = sock.recv(size - len(data))
         if not chunk:
-            raise ConnectionError(
-                "connection closed before response was complete"
-            )
+            raise ConnectionError("connection closed before response was complete")
         data.extend(chunk)
     return bytes(data)
 
@@ -315,9 +309,7 @@ def dns_query(ns, name, proto, timeout=2.0, port=53):
 def check_system(ctx):
     pretty = ""
     try:
-        m = re.search(
-            r'PRETTY_NAME="?([^"\n]+)', open("/etc/os-release").read()
-        )
+        m = re.search(r'PRETTY_NAME="?([^"\n]+)', open("/etc/os-release").read())
         pretty = m.group(1) if m else ""
     except OSError:
         pass
@@ -378,8 +370,7 @@ def check_routes(ctx):
     if eff_dev == WG_IF:
         return (
             "INFO",
-            f"internet exits via {WG_IF}"
-            + (" (split /1 routes)" if split else ""),
+            f"internet exits via {WG_IF}" + (" (split /1 routes)" if split else ""),
             detail,
             data,
         )
@@ -439,8 +430,7 @@ def check_interfaces(ctx):
         item
         for item in interfaces
         if any(
-            item[key]
-            for key in ("rx_errors", "tx_errors", "rx_dropped", "tx_dropped")
+            item[key] for key in ("rx_errors", "tx_errors", "rx_dropped", "tx_dropped")
         )
     ]
     data = {"interfaces": interfaces, "affected": len(affected)}
@@ -540,10 +530,7 @@ def check_dns(ctx):
         }
         rc, sysout = sysf.result()
         res = {k: f.result() for k, f in futs.items()}
-    rows = [
-        f"{n:<16} udp:{res[(n, 'udp')]:<14} tcp:{res[(n, 'tcp')]}"
-        for n in cands
-    ]
+    rows = [f"{n:<16} udp:{res[(n, 'udp')]:<14} tcp:{res[(n, 'tcp')]}" for n in cands]
     udp_ok = sum(1 for n in cands if res[(n, "udp")] == "ok")
     tcp_ok = sum(1 for n in cands if res[(n, "tcp")] == "ok")
     sys_ok = rc == 0 and bool(sysout)
@@ -577,9 +564,7 @@ def check_tcp(ctx):
     with cf.ThreadPoolExecutor(max_workers=len(TCP_TARGETS)) as ex:
         res = list(ex.map(one, TCP_TARGETS))
     rows = [f"{h}:{p:<5} {r}" for (h, p), r in zip(TCP_TARGETS, res)]
-    p443 = sum(
-        1 for (h, p), r in zip(TCP_TARGETS, res) if p == 443 and r == "ok"
-    )
+    p443 = sum(1 for (h, p), r in zip(TCP_TARGETS, res) if p == 443 and r == "ok")
     data = {"p443_ok": p443, "ok": sum(1 for r in res if r == "ok")}
     if p443 == 0:
         return (
@@ -664,9 +649,7 @@ def check_wireguard(ctx):
     conf = {}
     if ctx.is_root:
         conf = parse_wg_conf(WG_CONF)
-        data["conf"] = {
-            k: v for k, v in conf.items() if k not in ("interface",)
-        }
+        data["conf"] = {k: v for k, v in conf.items() if k not in ("interface",)}
         if conf.get("readable"):
             ifc = {
                 k: v
@@ -703,9 +686,7 @@ def check_wireguard(ctx):
                 ]
 
             hs = {a: int(b) for a, b in pairs(wg_show("latest-handshakes"))}
-            tr = {
-                a: (int(b), int(c)) for a, b, c in pairs(wg_show("transfer"))
-            }
+            tr = {a: (int(b), int(c)) for a, b, c in pairs(wg_show("transfer"))}
             ep = dict(pairs(wg_show("endpoints")))
             ai = dict(pairs(wg_show("allowed-ips")))
             data["listen_port"] = wg_show("listen-port")
@@ -738,9 +719,7 @@ def check_wireguard(ctx):
             if eip:
                 rce, er = sh(["ip", "-4", "route", "get", eip])
                 data["endpoint_via_wg"] = f"dev {WG_IF}" in er
-                lines.append(
-                    f"endpoint route: {er.splitlines()[0] if er else '?'}"
-                )
+                lines.append(f"endpoint route: {er.splitlines()[0] if er else '?'}")
             if not data["peers"]:
                 status, summ = "FAIL", f"{WG_IF} is up with NO peers loaded"
             elif all(p["hs_age"] is None for p in data["peers"]):
@@ -749,8 +728,7 @@ def check_wireguard(ctx):
                     f"{WG_IF} up, NO handshake (tx {data['peers'][0]['tx']} B / rx {data['peers'][0]['rx']} B)",
                 )
             elif any(
-                p["hs_age"] is not None and p["hs_age"] > 180
-                for p in data["peers"]
+                p["hs_age"] is not None and p["hs_age"] > 180 for p in data["peers"]
             ):
                 status, summ = "WARN", "handshake stale (>180 s)"
             else:
@@ -789,11 +767,7 @@ def check_firewall(ctx):
             ipt.append(
                 (
                     tool,
-                    [
-                        line
-                        for line in o.splitlines()
-                        if line.startswith("-A ")
-                    ],
+                    [line for line in o.splitlines() if line.startswith("-A ")],
                 )
             )
     block = [
@@ -806,8 +780,7 @@ def check_firewall(ctx):
         block += [
             r
             for r in rules
-            if re.search(r"-j (DROP|REJECT)", r)
-            and re.search(r"dport (53|51820)", r)
+            if re.search(r"-j (DROP|REJECT)", r) and re.search(r"dport (53|51820)", r)
         ]
     pol_drop = len(re.findall(r"policy drop", nft)) if rc == 0 else 0
     tables = len(re.findall(r"(?m)^table ", nft)) if rc == 0 else 0
@@ -885,9 +858,7 @@ def check_units(ctx):
         if rc2 != 0:
             usr = ""
     elif not ctx.is_root:
-        rc2, usr = sh(
-            ["systemctl", "--user", "--failed", "--no-legend", "--no-pager"]
-        )
+        rc2, usr = sh(["systemctl", "--user", "--failed", "--no-legend", "--no-pager"])
         usr = usr if rc2 == 0 else ""
     failed = [
         line
@@ -944,9 +915,7 @@ def check_timeline(ctx):
     hist = []
     try:
         t0 = time.time() - 86400
-        for line in open(
-            os.path.join(ctx.home, ".zsh_history"), errors="replace"
-        ):
+        for line in open(os.path.join(ctx.home, ".zsh_history"), errors="replace"):
             m = re.match(r"^: (\d+):\d+;(.*)", line)
             if m and int(m[1]) >= t0 and NETISH.search(m[2]):
                 hist.append(
@@ -1006,6 +975,26 @@ CHECK_HINTS = {
 }
 
 
+CHECK_FILTERS = ("all", "issues", "skipped")
+
+
+def filter_check_ids(results, mode):
+    check_ids = list(CHECKS)
+    if mode == "issues":
+        return [
+            check_id
+            for check_id in check_ids
+            if results.get(check_id) and results[check_id].status in ("FAIL", "WARN")
+        ]
+    if mode == "skipped":
+        return [
+            check_id
+            for check_id in check_ids
+            if results.get(check_id) and results[check_id].status == "SKIP"
+        ]
+    return check_ids
+
+
 def diagnose(res):
     def data_for(key):
         return res[key].data if key in res else {}
@@ -1040,11 +1029,7 @@ def diagnose(res):
             )
         )
     for p in peers:
-        if (
-            p.get("hs_age") is None
-            and p.get("tx", 0) > 0
-            and p.get("rx", 0) == 0
-        ):
+        if p.get("hs_age") is None and p.get("tx", 0) > 0 and p.get("rx", 0) == 0:
             f.append(
                 (
                     "WARN",
@@ -1158,9 +1143,7 @@ class Audit:
                 {},
             )
         with self.lock:
-            self.results[cid] = Result(
-                cid, title, st, sm, de, da, time.time() - t0
-            )
+            self.results[cid] = Result(cid, title, st, sm, de, da, time.time() - t0)
             self.active -= 1
 
     def start(self, ids=None):
@@ -1179,9 +1162,7 @@ class Audit:
     def report(self):
         ctx = self.ctx
         checks = [
-            dataclasses.asdict(self.results[i])
-            for i in CHECKS
-            if i in self.results
+            dataclasses.asdict(self.results[i]) for i in CHECKS if i in self.results
         ]
         diag = [
             {"severity": s, "finding": t, "action": a}
@@ -1189,9 +1170,7 @@ class Audit:
         ]
         rep = {
             "tool": f"netaudit {VERSION}",
-            "generated": dt.datetime.now()
-            .astimezone()
-            .isoformat(timespec="seconds"),
+            "generated": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
             "host": socket.gethostname(),
             "user": ctx.user,
             "root": ctx.is_root,
@@ -1221,8 +1200,7 @@ def fmt_txt(rep):
     if rep.get("comparison"):
         o += ["", "BASELINE COMPARISON"] + comparison_lines(rep)
     o += ["", "CHECKS"] + [
-        f"  [{c['status']:<4}] {c['title']:<16} {c['summary']}"
-        for c in rep["checks"]
+        f"  [{c['status']:<4}] {c['title']:<16} {c['summary']}" for c in rep["checks"]
     ]
     for c in rep["checks"]:
         o += [
@@ -1243,9 +1221,9 @@ def fmt_md(rep):
         "",
         "## Diagnosis",
     ]
-    o += [
-        f"- **{d['severity']}** {d['finding']}" for d in rep["diagnosis"]
-    ] or ["- no problems detected"]
+    o += [f"- **{d['severity']}** {d['finding']}" for d in rep["diagnosis"]] or [
+        "- no problems detected"
+    ]
     if rep.get("comparison"):
         o += ["", "## Baseline comparison"]
         o += [f"- {line}" for line in comparison_lines(rep)]
@@ -1332,9 +1310,7 @@ def expand_patterns(patterns, available):
     selected = []
     unmatched = []
     for pattern in patterns:
-        matches = [
-            name for name in available if fnmatch.fnmatchcase(name, pattern)
-        ]
+        matches = [name for name in available if fnmatch.fnmatchcase(name, pattern)]
         if not matches:
             unmatched.append(pattern)
         for name in matches:
@@ -1364,9 +1340,9 @@ def compare_reports(current, baseline):
     status_changes = []
     for check_id, current_check in current_checks.items():
         baseline_check = baseline_checks.get(check_id)
-        if baseline_check and baseline_check.get(
+        if baseline_check and baseline_check.get("status") != current_check.get(
             "status"
-        ) != current_check.get("status"):
+        ):
             status_changes.append(
                 {
                     "id": check_id,
@@ -1390,9 +1366,7 @@ def compare_reports(current, baseline):
         "baseline_generated": baseline.get("generated"),
         "status_changes": status_changes,
         "added_checks": [
-            check_id
-            for check_id in current_checks
-            if check_id not in baseline_checks
+            check_id for check_id in current_checks if check_id not in baseline_checks
         ],
         "route_changes": route_changes,
     }
@@ -1401,12 +1375,8 @@ def compare_reports(current, baseline):
 def load_baseline(path):
     with open(path, encoding="utf-8") as baseline_file:
         baseline = json.load(baseline_file)
-    if not isinstance(baseline, dict) or not isinstance(
-        baseline.get("checks"), list
-    ):
-        raise ValueError(
-            "expected a netaudit report object with a checks list"
-        )
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("checks"), list):
+        raise ValueError("expected a netaudit report object with a checks list")
     if any(
         not isinstance(check, dict) or not isinstance(check.get("id"), str)
         for check in baseline["checks"]
@@ -1424,14 +1394,11 @@ def comparison_lines(report):
     comparison = report.get("comparison")
     if not comparison:
         return []
-    lines = [
-        f"Baseline generated: {comparison.get('baseline_generated') or 'unknown'}"
-    ]
+    lines = [f"Baseline generated: {comparison.get('baseline_generated') or 'unknown'}"]
     changes = comparison.get("status_changes", [])
     if changes:
         lines.extend(
-            f"{item['title']}: {item['from']} -> {item['to']}"
-            for item in changes
+            f"{item['title']}: {item['from']} -> {item['to']}" for item in changes
         )
     else:
         lines.append("No check status changes.")
@@ -1472,9 +1439,7 @@ def export(rep, fmts, ctx, outdir=None):
             for name, fn in FORMATS.values():
                 add(f"netaudit/{name}", fn(rep).encode())
             for c in rep["checks"]:
-                add(
-                    f"netaudit/raw/{c['id']}.txt", (c["detail"] or "").encode()
-                )
+                add(f"netaudit/raw/{c['id']}.txt", (c["detail"] or "").encode())
         put("bundle.tar.gz", buf.getvalue())
     lines = []
     for fn in sorted(os.listdir(base)):
@@ -1519,9 +1484,7 @@ def write_file(path, content, mode):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     with os.fdopen(fd, "w") as fh:
         fh.write(content)
-    os.replace(
-        tmp, path
-    )  # replaces a dangling/valid symlink itself, never follows it
+    os.replace(tmp, path)  # replaces a dangling/valid symlink itself, never follows it
 
 
 def plan_restore(ctx):
@@ -1559,9 +1522,7 @@ def plan_restore(ctx):
                 ("write", "/etc/resolv.conf", "nameserver 1.1.1.1\n", 0o644),
             )
         )
-    steps.append(
-        (f"verify: getent hosts {ctx.name}", ["getent", "hosts", ctx.name])
-    )
+    steps.append((f"verify: getent hosts {ctx.name}", ["getent", "hosts", ctx.name]))
     return steps
 
 
@@ -1642,9 +1603,7 @@ def action_wg_up(ctx):
     if ok:
         log.append("[ok] handshake completed: tunnel is carrying traffic")
     else:
-        log.append(
-            "[error] no handshake within ~10 s: REVERTING to direct internet"
-        )
+        log.append("[error] no handshake within ~10 s: REVERTING to direct internet")
         log += run_steps(ctx, plan_restore(ctx))
     log_action(ctx, "ACTION wg-up " + ("ok" if ok else "reverted"))
     return log
@@ -1664,9 +1623,7 @@ def action_import(ctx, src):
         if len(c["peers"]) != 1 or not c["peers"][0].get("publickey"):
             errs.append("expected exactly one [Peer] with PublicKey")
         if not c.get("endpoint_ip"):
-            errs.append(
-                "Endpoint must be an IPv4:port literal (Mullvad configs are)"
-            )
+            errs.append("Endpoint must be an IPv4:port literal (Mullvad configs are)")
         if c.get("peer_is_own_key"):
             errs.append(
                 "peer PublicKey equals your own key: this config is also broken"
@@ -1722,7 +1679,7 @@ MAIN KEYS
     up/down j/k   select check          Enter  show full detail
     r  re-run all   R  re-run selected   d  full diagnosis
     e  export menu  a  repair actions    t  toggle report redaction
-    ?  this help    q  quit
+    f  cycle all / issues / skipped      ?  this help    q  quit
 DETAIL / DIAGNOSIS: j/k PgUp/PgDn scroll, q/Esc/Enter back
 EXPORT: j/m/t/h/c/b toggle formats; a or * select all; n clear; o choose folder
     Enter writes selected formats; leave folder blank for the default; q/Esc back.
@@ -1747,6 +1704,7 @@ class App:
             "bundle": True,
         }
         self.asel = 0
+        self.filter_index = 0
         self.actions = [
             (
                 "restore",
@@ -1780,9 +1738,7 @@ class App:
                 1,
             ):
                 curses.init_pair(i, fg, bg)
-                self.c[k] = curses.color_pair(i) | (
-                    curses.A_DIM if k == "SKIP" else 0
-                )
+                self.c[k] = curses.color_pair(i) | (curses.A_DIM if k == "SKIP" else 0)
         self.c["HDR"] = curses.A_REVERSE
 
     def put(self, y, x, s, attr=0):
@@ -1806,16 +1762,21 @@ class App:
                 f"{len(self.audit.results)}/{len(CHECKS)} checks finished. Results update as checks "
                 "complete; no repairs run automatically."
             )
-        ids = list(CHECKS)
+        ids = filter_check_ids(self.audit.results, CHECK_FILTERS[self.filter_index])
+        if not ids:
+            return (
+                f"No completed {CHECK_FILTERS[self.filter_index]} checks match. "
+                "Press f to cycle the list filter."
+            )
         cid = ids[self.sel]
         result = self.audit.results.get(cid)
         if not result:
-            return (
-                f"{CHECKS[cid][0]} has not run yet. Press r to run the audit."
-            )
+            return f"{CHECKS[cid][0]} has not run yet. Press r to run the audit."
         hint = CHECK_HINTS[cid]
         if result.status in ("FAIL", "WARN"):
-            return f"{result.status}: {hint} Next: Enter for evidence or d for diagnosis."
+            return (
+                f"{result.status}: {hint} Next: Enter for evidence or d for diagnosis."
+            )
         if result.status == "SKIP":
             return f"Skipped: {hint} Check root access or whether the required command is installed."
         return f"{CHECKS[cid][0]}: {hint} Press Enter to inspect its evidence."
@@ -1871,19 +1832,22 @@ class App:
                 self.put(y, 1, f"{sev:<4} {txt}", self.c[sev])
                 y += 1
             if len(diag) > 3:
-                self.put(
-                    y, 1, f"...{len(diag) - 3} more (press d)", self.c["INFO"]
-                )
+                self.put(y, 1, f"...{len(diag) - 3} more (press d)", self.c["INFO"])
                 y += 1
         y += 1
         vis = max(1, h - y - 3)
-        ids = list(CHECKS)
-        self.sel = max(0, min(self.sel, len(ids) - 1))
-        self.top = (
-            min(max(self.top, self.sel - vis + 1), self.sel)
-            if self.sel < self.top or self.sel >= self.top + vis
-            else self.top
-        )
+        ids = filter_check_ids(a.results, CHECK_FILTERS[self.filter_index])
+        if ids:
+            self.sel = max(0, min(self.sel, len(ids) - 1))
+            self.top = (
+                min(max(self.top, self.sel - vis + 1), self.sel)
+                if self.sel < self.top or self.sel >= self.top + vis
+                else self.top
+            )
+        else:
+            self.sel = self.top = 0
+            label = CHECK_FILTERS[self.filter_index]
+            self.put(y, 1, f"No {label} checks match. Press f to change filter.")
         for row, cid in enumerate(ids[self.top : self.top + vis]):
             r = a.results.get(cid)
             sel = (self.top + row) == self.sel
@@ -1896,10 +1860,8 @@ class App:
                 f"[{st:<4}]",
                 attr | (curses.A_REVERSE if sel else 0),
             )
-            self.put(
-                y + row, 6, line.ljust(w - 7), curses.A_REVERSE if sel else 0
-            )
-        keys = " Enter detail  r rerun  e export  a repair  d diagnosis  t redact  ? help  q quit "
+            self.put(y + row, 6, line.ljust(w - 7), curses.A_REVERSE if sel else 0)
+        keys = " j/k move  Enter view  r all  R one  d diagnosis  e export  a repair  f filter  ? help  q quit "
         self.put(
             h - 2,
             0,
@@ -1913,8 +1875,7 @@ class App:
         self.put(
             0,
             0,
-            " Export (redaction %s) "
-            % ("ON" if self.ctx.redact_on else "OFF"),
+            " Export (redaction %s) " % ("ON" if self.ctx.redact_on else "OFF"),
             self.c["HDR"],
         )
         names = {
@@ -1928,9 +1889,7 @@ class App:
         self.put(1, 2, "Choose formats, then press Enter to write:")
         for i, k in enumerate(names):
             self.put(2 + i, 2, f"[{'x' if self.fmt[k] else ' '}] {names[k]}")
-        destination = (
-            self.outdir or "~/netaudit_reports/<timestamp>/ (default)"
-        )
+        destination = self.outdir or "~/netaudit_reports/<timestamp>/ (default)"
         self.put(9, 2, f"Folder: {destination}")
         self.put(
             10,
@@ -1961,9 +1920,7 @@ class App:
         if self.ctx.readonly:
             self.put(2, 2, "--readonly: repairs disabled", self.c["WARN"])
         elif not self.ctx.is_root:
-            self.put(
-                2, 2, "needs root: quit and run: sudo netaudit", self.c["WARN"]
-            )
+            self.put(2, 2, "needs root: quit and run: sudo netaudit", self.c["WARN"])
         hints = {
             "restore": "Restores direct routing and DNS; use if the tunnel is blocking connectivity.",
             "wgup": "Starts the configured tunnel; if no handshake arrives, direct routing is restored.",
@@ -2023,9 +1980,7 @@ class App:
         )
         for i, l in enumerate(lines):
             self.put(2 + i, 2, l)
-        self.put(
-            3 + len(lines), 2, "Proceed? press y to run, anything else cancels"
-        )
+        self.put(3 + len(lines), 2, "Proceed? press y to run, anything else cancels")
         self.scr.refresh()
         self.scr.timeout(-1)
         k = self.scr.getch()
@@ -2043,9 +1998,7 @@ class App:
                 "restore direct internet",
                 [f"{i + 1}. {l}" for i, (l, _) in enumerate(steps)],
             ):
-                self.view(
-                    "Restore: result", "\n".join(run_steps(self.ctx, steps))
-                )
+                self.view("Restore: result", "\n".join(run_steps(self.ctx, steps)))
                 self.audit.start()
         elif key == "wgup":
             if self.confirm(
@@ -2058,9 +2011,7 @@ class App:
                 self.scr.erase()
                 self.put(1, 2, "working (up to ~25 s)...")
                 self.scr.refresh()
-                self.view(
-                    "Tunnel up: result", "\n".join(action_wg_up(self.ctx))
-                )
+                self.view("Tunnel up: result", "\n".join(action_wg_up(self.ctx)))
                 self.audit.start()
         elif key == "import":
             src = self.prompt("path to Mullvad .conf")
@@ -2072,9 +2023,7 @@ class App:
                     "add Table=off + PostUp/PostDown route hooks",
                 ],
             ):
-                self.view(
-                    "Import: result", "\n".join(action_import(self.ctx, src))
-                )
+                self.view("Import: result", "\n".join(action_import(self.ctx, src)))
 
     def loop(self):
         while True:
@@ -2155,19 +2104,26 @@ class App:
                 elif k in (10, curses.KEY_ENTER):
                     self.do_action()
             else:
-                n = len(CHECKS)
+                ids = filter_check_ids(
+                    self.audit.results, CHECK_FILTERS[self.filter_index]
+                )
+                n = len(ids)
                 if k in (ord("q"), 27):
                     return
-                elif k in (curses.KEY_DOWN, ord("j")):
+                elif k == ord("f"):
+                    self.filter_index = (self.filter_index + 1) % len(CHECK_FILTERS)
+                    self.sel = self.top = 0
+                    self.msg = f"showing {CHECK_FILTERS[self.filter_index]} checks"
+                elif n and k in (curses.KEY_DOWN, ord("j")):
                     self.sel = min(self.sel + 1, n - 1)
-                elif k in (curses.KEY_UP, ord("k")):
+                elif n and k in (curses.KEY_UP, ord("k")):
                     self.sel = max(self.sel - 1, 0)
-                elif k == curses.KEY_NPAGE:
+                elif n and k == curses.KEY_NPAGE:
                     self.sel = min(self.sel + 8, n - 1)
-                elif k == curses.KEY_PPAGE:
+                elif n and k == curses.KEY_PPAGE:
                     self.sel = max(self.sel - 8, 0)
-                elif k in (10, curses.KEY_ENTER):
-                    cid = list(CHECKS)[self.sel]
+                elif n and k in (10, curses.KEY_ENTER):
+                    cid = ids[self.sel]
                     r = self.audit.results.get(cid)
                     self.view(
                         f"{CHECKS[cid][0]} [{r.status if r else 'running'}]  {r.summary if r else ''}",
@@ -2179,8 +2135,8 @@ class App:
                     )
                 elif k == ord("r") and not self.audit.active:
                     self.audit.start()
-                elif k == ord("R") and not self.audit.active:
-                    self.audit.start([list(CHECKS)[self.sel]])
+                elif k == ord("R") and not self.audit.active and n:
+                    self.audit.start([ids[self.sel]])
                 elif k == ord("d"):
                     d = diagnose(self.audit.results)
                     self.view(
@@ -2198,9 +2154,8 @@ class App:
                     self.mode = "actions"
                 elif k == ord("t"):
                     self.ctx.redact_on = not self.ctx.redact_on
-                    self.msg = (
-                        "redaction %s (applies to exports/detail now)"
-                        % ("ON" if self.ctx.redact_on else "OFF")
+                    self.msg = "redaction %s (applies to exports/detail now)" % (
+                        "ON" if self.ctx.redact_on else "OFF"
                     )
                 elif k == ord("?"):
                     self.view("Help", HELP)
@@ -2227,8 +2182,7 @@ def selftest():
 
     t(
         "redact PrivateKey",
-        "SECRET"
-        not in redact("PrivateKey = SECRETSECRET=\nPublicKey = pubpubpub=")
+        "SECRET" not in redact("PrivateKey = SECRETSECRET=\nPublicKey = pubpubpub=")
         and "pubpubpub" in redact("PublicKey = pubpubpub="),
     )
     t("redact token", "ghp_" not in redact("x ghp_" + "a" * 30))
@@ -2240,6 +2194,20 @@ def selftest():
         == {"tx": 2, "rx": 2, "loss": 0.0, "avg": 2.5},
     )
     t("every check has an inline hint", set(CHECK_HINTS) == set(CHECKS))
+    filter_results = {
+        "routes": Result("routes", "Routing", "FAIL"),
+        "dns": Result("dns", "DNS", "WARN"),
+        "interfaces": Result("interfaces", "Interface health", "SKIP"),
+        "system": Result("system", "System", "OK"),
+    }
+    t(
+        "issues filter shows only warnings and failures",
+        filter_check_ids(filter_results, "issues") == ["routes", "dns"],
+    )
+    t(
+        "skipped filter shows only skipped checks",
+        filter_check_ids(filter_results, "skipped") == ["interfaces"],
+    )
     interface_fixture = json.dumps(
         [
             {
@@ -2271,8 +2239,7 @@ def selftest():
     )
     t(
         "unmatched format wildcard is reported",
-        expand_format_patterns(["no-such-format*"])
-        == ([], ["no-such-format*"]),
+        expand_format_patterns(["no-such-format*"]) == ([], ["no-such-format*"]),
     )
     t(
         "check wildcard selects only matching IDs",
@@ -2320,8 +2287,7 @@ def selftest():
         "baseline comparison finds status and route changes",
         comparison["status_changes"][0]["from"] == "OK"
         and comparison["status_changes"][0]["to"] == "WARN"
-        and comparison["route_changes"]["eff_dev"]
-        == {"from": "eth0", "to": "wg0"},
+        and comparison["route_changes"]["eff_dev"] == {"from": "eth0", "to": "wg0"},
     )
     t(
         "baseline comparison identifies added checks",
@@ -2370,14 +2336,12 @@ def selftest():
     threading.Thread(target=_serve, daemon=True).start()
     t(
         "dns_query parses a real UDP answer",
-        dns_query("127.0.0.1", "example.com", "udp", 2, srv.getsockname()[1])
-        == "ok",
+        dns_query("127.0.0.1", "example.com", "udp", 2, srv.getsockname()[1]) == "ok",
     )
     srv.close()
     t(
         "dns_query reports timeout/refused as a name",
-        dns_query("127.0.0.1", "example.com", "tcp", 0.5, 9)
-        in ("refused", "timeout"),
+        dns_query("127.0.0.1", "example.com", "tcp", 0.5, 9) in ("refused", "timeout"),
     )
     with tempfile.TemporaryDirectory() as td:
         baseline_path = os.path.join(td, "baseline.json")
@@ -2395,9 +2359,7 @@ def selftest():
         c = parse_wg_conf(p)
         t(
             "conf parsed, endpoint ip",
-            c["endpoint_ip"] == "203.0.113.9"
-            and c["table_off"]
-            and c["has_postup"],
+            c["endpoint_ip"] == "203.0.113.9" and c["table_off"] and c["has_postup"],
         )
         t("conf never stores private key", "SECRETKEY" not in json.dumps(c))
         ctx = Ctx(offline=True)
@@ -2436,9 +2398,7 @@ def selftest():
             "root": False,
             "offline": True,
             "redacted": True,
-            "diagnosis": [
-                {"severity": "FAIL", "finding": "x|y", "action": None}
-            ],
+            "diagnosis": [{"severity": "FAIL", "finding": "x|y", "action": None}],
             "checks": [
                 {
                     "id": "a",
@@ -2477,17 +2437,13 @@ def selftest():
         )
         t(
             "json valid",
-            json.load(open(os.path.join(td, "out", "report.json")))["checks"][
-                0
-            ]["id"]
+            json.load(open(os.path.join(td, "out", "report.json")))["checks"][0]["id"]
             == "a",
         )
         t(
             "bundle readable",
             "netaudit/raw/a.txt"
-            in tarfile.open(
-                os.path.join(td, "out", "bundle.tar.gz")
-            ).getnames(),
+            in tarfile.open(os.path.join(td, "out", "bundle.tar.gz")).getnames(),
         )
     print(f"selftest: {ok} ok, {fail} failed")
     return 1 if fail else 0
@@ -2498,9 +2454,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Network audit + export TUI", add_help=True
     )
-    ap.add_argument(
-        "--plain", action="store_true", help="one-shot text report"
-    )
+    ap.add_argument("--plain", action="store_true", help="one-shot text report")
     ap.add_argument("--json", action="store_true", help="one-shot JSON report")
     ap.add_argument(
         "--export",
@@ -2518,20 +2472,14 @@ def main():
         help="compare this audit with a previous netaudit JSON report",
     )
     ap.add_argument("--out", metavar="DIR", help="export directory")
-    ap.add_argument(
-        "--offline", action="store_true", help="no external HTTPS request"
-    )
+    ap.add_argument("--offline", action="store_true", help="no external HTTPS request")
     ap.add_argument(
         "--no-redact",
         action="store_true",
         help="do not redact secrets in output",
     )
-    ap.add_argument(
-        "--readonly", action="store_true", help="disable repair actions"
-    )
-    ap.add_argument(
-        "--name", default="github.com", help="hostname used for DNS tests"
-    )
+    ap.add_argument("--readonly", action="store_true", help="disable repair actions")
+    ap.add_argument("--name", default="github.com", help="hostname used for DNS tests")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--version", action="version", version=VERSION)
     a = ap.parse_args()
@@ -2539,9 +2487,7 @@ def main():
         return selftest()
     check_ids = list(CHECKS)
     if a.check is not None:
-        patterns = [
-            item.strip() for item in a.check.split(",") if item.strip()
-        ]
+        patterns = [item.strip() for item in a.check.split(",") if item.strip()]
         check_ids, bad = expand_check_patterns(patterns)
         if not patterns or bad:
             invalid = bad or [a.check]

@@ -24,6 +24,9 @@ or `*` to select all, `o` to choose an output folder, then Enter to write.
 Leave the folder blank to use `~/netaudit_reports/<timestamp>/`. Files are
 created with mode `0600`; the folder includes a SHA-256 manifest.
 
+On the main screen, press `f` to cycle through all checks, warnings/failures,
+or skipped checks. Press `R` to rerun the selected check or `r` to rerun all.
+
 ## Command Line
 
 ```sh
