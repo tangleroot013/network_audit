@@ -31,7 +31,9 @@ or skipped checks. Press `R` to rerun the selected check or `r` to rerun all.
 
 The `systemd-resolved` check reports service state but does not assume that an
 inactive service caused a resolver symlink. The WireGuard check reports any
-`DNS=` setting found in `wg0.conf`.
+`DNS=` setting found in `wg0.conf`. The `dnsroutes` check shows the kernel's
+chosen interface for each configured nameserver; this confirms the routing
+path, not whether the peer can forward DNS.
 
 For an explicit static-resolver repair, run the TUI as root, open Actions, and
 choose **Write static DNS**. Enter IPv4 or IPv6 resolver addresses, review the
@@ -39,6 +41,24 @@ confirmation, and the tool backs up the current file or symlink before writing
 a regular `/etc/resolv.conf` with mode `0644`. It then attempts a lookup. It
 does not mask or stop `systemd-resolved`, alter WireGuard configuration, or
 restart the tunnel.
+
+If nameserver lookups route through `wg0`, open Actions and choose **Route DNS
+outside wg0**. It detects a non-WireGuard IPv4 default gateway, checks each
+nameserver route, and adds a missing `IP/32 via GATEWAY dev DEVICE` route only
+when the current route uses `wg0`. Existing explicit host routes are left
+untouched. With `wg-quick` policy routing, it detects the `not fwmark` table
+and places the host route there; otherwise it uses the main table. It verifies
+the resulting route and attempts rollback if traffic still would not use the
+physical interface. The result prints an exact undo command; **Remove DNS
+bypass routes** removes matching routes. Bypass routes are temporary and do not
+survive a `wg-quick` restart or network/container reconfiguration.
+
+Run `python3 netaudit.py --check 'dns,dnsroutes,wireguard' --json --offline` to
+inspect resolver status, nameserver routes, and WireGuard state together. If
+you change `AllowedIPs`, use only networks you know should traverse the tunnel:
+example private ranges are not universal, and narrowing a full-tunnel config
+changes which traffic is protected. netaudit does not edit `AllowedIPs` or
+restart `wg0` automatically.
 
 Persistence depends on the container's init setup. A systemd oneshot unit is
 appropriate only when systemd is PID 1 and its bus is reachable. A
@@ -55,6 +75,7 @@ connectivity.
 python3 netaudit.py --plain --offline
 python3 netaudit.py --json --offline
 python3 netaudit.py --check 'routes,interfaces' --json --offline
+python3 netaudit.py --check 'dns,dnsroutes,wireguard' --json --offline
 python3 netaudit.py --export json,md,csv,bundle --out ./audit-report --offline
 python3 netaudit.py --export 'j*,csv' --out ./audit-report --offline
 python3 netaudit.py --export '*' --out ./all-formats --offline

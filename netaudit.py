@@ -619,6 +619,97 @@ def check_dns(ctx):
     return ("OK" if sys_ok else "FAIL"), summ, detail, data
 
 
+def parse_route_lookup(output):
+    device_match = re.search(r"\bdev\s+(\S+)", output)
+    gateway_match = re.search(r"\bvia\s+(\S+)", output)
+    return {
+        "dev": device_match.group(1) if device_match else None,
+        "via": gateway_match.group(1) if gateway_match else None,
+    }
+
+
+def check_dns_routes(ctx):
+    state, nameservers, _ = resolv_state()
+    if not nameservers:
+        return "SKIP", f"no nameservers configured ({state})", "", {}
+
+    routes = []
+    for nameserver in nameservers:
+        try:
+            address = ipaddress.ip_address(nameserver)
+        except ValueError:
+            routes.append(
+                {
+                    "nameserver": nameserver,
+                    "dev": None,
+                    "via": None,
+                    "local_stub": False,
+                    "error": "invalid nameserver IP",
+                }
+            )
+            continue
+        family = "-6" if address.version == 6 else "-4"
+        rc, output = sh(["ip", family, "route", "get", nameserver])
+        route = (
+            parse_route_lookup(output)
+            if rc == 0
+            else {"dev": None, "via": None}
+        )
+        routes.append(
+            {
+                "nameserver": nameserver,
+                "dev": route["dev"],
+                "via": route["via"],
+                "local_stub": address.is_loopback,
+                "error": output if rc != 0 else None,
+            }
+        )
+
+    through_wg = [route for route in routes if route["dev"] == WG_IF]
+    unresolved = [route for route in routes if route["dev"] is None]
+    local_stubs = [route for route in routes if route["local_stub"]]
+    external_routes = [route for route in routes if not route["local_stub"]]
+    detail = "\n".join(
+        f"{route['nameserver']}: "
+        + (
+            f"local stub via {route['dev']}; upstream path unknown"
+            if route["local_stub"] and route["dev"]
+            else (
+                f"local nameserver; route lookup failed: {route['error']}"
+                if route["local_stub"]
+                else (
+                    f"via {route['via']} dev {route['dev']}"
+                    if route["via"] and route["dev"]
+                    else (
+                        f"dev {route['dev']}"
+                        if route["dev"]
+                        else f"route lookup failed: {route['error']}"
+                    )
+                )
+            )
+        )
+        for route in routes
+    )
+    data = {
+        "routes": routes,
+        "through_wg": bool(through_wg),
+        "unresolved": len(unresolved),
+    }
+    if through_wg:
+        summary = f"{len(through_wg)}/{len(external_routes)} non-local DNS server(s) route through {WG_IF}"
+    elif unresolved:
+        summary = f"route lookup failed for {len(unresolved)}/{len(routes)} DNS server(s)"
+    elif not external_routes:
+        summary = (
+            "only local DNS stubs are configured; upstream route is unknown"
+        )
+    else:
+        summary = f"all {len(external_routes)} non-local DNS server(s) route outside {WG_IF}"
+        if local_stubs:
+            summary += f"; {len(local_stubs)} local stub upstream path unknown"
+    return "INFO", summary, detail, data
+
+
 def check_tcp(ctx):
     def one(t):
         try:
@@ -1039,6 +1130,7 @@ CHECKS = {
     "resolv": ("resolv.conf", check_resolv),
     "resolved": ("systemd-resolved", check_systemd_resolved),
     "dns": ("DNS", check_dns),
+    "dnsroutes": ("DNS route path", check_dns_routes),
     "tcp": ("TCP egress", check_tcp),
     "https": ("Mullvad status", check_https),
     "wireguard": ("WireGuard", check_wireguard),
@@ -1057,6 +1149,7 @@ CHECK_HINTS = {
     "resolv": "A missing or dangling resolver file can break DNS even when routes are healthy.",
     "resolved": "Service state is context only; confirm who owns resolv.conf before disabling it.",
     "dns": "Compare system resolution with raw UDP/TCP results to isolate resolver problems.",
+    "dnsroutes": "Shows the kernel-selected interface for each configured nameserver; route path is not proof of DNS reachability.",
     "tcp": "TCP results distinguish outbound connectivity from DNS or ICMP filtering.",
     "https": "This checks the reported Mullvad exit; offline mode intentionally skips it.",
     "wireguard": "Root access reveals config and handshake evidence; inspect it before repairing.",
@@ -1092,12 +1185,13 @@ def diagnose(res):
     def data_for(key):
         return res[key].data if key in res else {}
 
-    r, dn, tc, rs, wg = (
+    r, dn, tc, rs, wg, dns_routes = (
         data_for("routes"),
         data_for("dns"),
         data_for("tcp"),
         data_for("resolv"),
         data_for("wireguard"),
+        data_for("dnsroutes"),
     )
     peers, conf, f = wg.get("peers") or [], wg.get("conf") or {}, []
     if r.get("unreachable"):
@@ -1171,6 +1265,14 @@ def diagnose(res):
                 "WARN",
                 "Port 53 is dead to every resolver while 443 works: host DNS proxy hung, upstream filter, or local rule.",
                 None,
+            )
+        )
+    if dn and not dn.get("system_ok") and dns_routes.get("through_wg"):
+        f.append(
+            (
+                "WARN",
+                "Configured DNS server routes through wg0 while system resolution fails; this shows the path, not whether the peer forwards DNS. Try a temporary bypass or review AllowedIPs.",
+                "dnsbypass",
             )
         )
     if (
@@ -1743,6 +1845,184 @@ def action_static_dns(ctx, nameservers):
     return lines
 
 
+def parse_default_uplink(output):
+    for line in output.splitlines():
+        device = re.search(r"\bdev\s+(\S+)", line)
+        gateway = re.search(r"\bvia\s+(\S+)", line)
+        if device and gateway and device.group(1) != WG_IF:
+            return gateway.group(1), device.group(1)
+    return None, None
+
+
+def parse_wireguard_route_table(rule_output):
+    for line in rule_output.splitlines():
+        if not re.search(r"\bnot\b.*\bfwmark\b", line):
+            continue
+        table = re.search(r"\blookup\s+(\S+)", line)
+        if table and table.group(1) != "main":
+            return table.group(1)
+    return "main"
+
+
+def dns_bypass_route_command(
+    nameserver, gateway, device, table="main", remove=False
+):
+    action = "del" if remove else "add"
+    return [
+        "ip",
+        "-4",
+        "route",
+        action,
+        f"{nameserver}/32",
+        "via",
+        gateway,
+        "dev",
+        device,
+        "table",
+        table,
+    ]
+
+
+def physical_uplink():
+    rc, output = sh(["ip", "-4", "route", "show", "default"])
+    if rc != 0:
+        return None, None
+    return parse_default_uplink(output)
+
+
+def action_dns_bypass(ctx, nameservers, remove=False):
+    try:
+        addresses = parse_nameservers(" ".join(nameservers))
+    except ValueError as error:
+        return [f"[error] {error}"]
+    if any(
+        ipaddress.ip_address(address).version != 4 for address in addresses
+    ):
+        return [
+            "[error] DNS bypass routes currently support IPv4 nameservers only"
+        ]
+
+    gateway, device = physical_uplink()
+    if not gateway or not device:
+        return [
+            "[error] no non-WireGuard IPv4 default route with a gateway was found",
+            "[info] refusing to guess an uplink or install a route that may blackhole DNS",
+        ]
+
+    lines = [f"[info] physical uplink detected: via {gateway} dev {device}"]
+    rc, rules = sh(["ip", "-4", "rule", "show"])
+    if rc != 0:
+        return lines + [f"[error] cannot inspect IPv4 policy rules: {rules}"]
+    table = parse_wireguard_route_table(rules)
+    lines.append(f"[info] DNS bypass route table: {table}")
+    changed = []
+    for address in addresses:
+        rc, output = sh(["ip", "-4", "route", "get", address])
+        current = (
+            parse_route_lookup(output)
+            if rc == 0
+            else {"dev": None, "via": None}
+        )
+        if rc != 0:
+            lines.append(
+                f"[error] cannot inspect route for {address}: {output}"
+            )
+            continue
+
+        prefix = f"{address}/32"
+        table_args = ["table", table]
+        if remove:
+            rc, exact = sh(
+                ["ip", "-4", "route", "show", *table_args, "exact", prefix]
+            )
+            if rc != 0 or not exact.strip():
+                lines.append(
+                    f"[info] no explicit host route found for {address}"
+                )
+                continue
+            has_gateway = re.search(
+                rf"\bvia\s+{re.escape(gateway)}(?:\s|$)", exact
+            )
+            has_device = re.search(
+                rf"\bdev\s+{re.escape(device)}(?:\s|$)", exact
+            )
+            if not has_gateway or not has_device:
+                lines.append(
+                    f"[warn] {address} has an explicit route not matching the detected uplink; left unchanged"
+                )
+                continue
+            command = dns_bypass_route_command(
+                address, gateway, device, table=table, remove=True
+            )
+        else:
+            if current["dev"] != WG_IF:
+                lines.append(
+                    f"[info] {address} already routes via {current['dev']}; no bypass needed"
+                )
+                continue
+            rc, exact = sh(
+                ["ip", "-4", "route", "show", *table_args, "exact", prefix]
+            )
+            if rc == 0 and exact.strip():
+                lines.append(
+                    f"[warn] {address} already has an explicit host route; left unchanged"
+                )
+                continue
+            command = dns_bypass_route_command(
+                address, gateway, device, table=table
+            )
+
+        rc, output = sh(command)
+        if rc == 0:
+            if not remove:
+                verify_rc, verify_output = sh(
+                    ["ip", "-4", "route", "get", address]
+                )
+                verified_route = (
+                    parse_route_lookup(verify_output)
+                    if verify_rc == 0
+                    else {"dev": None, "via": None}
+                )
+                if verified_route["dev"] != device:
+                    rollback = dns_bypass_route_command(
+                        address, gateway, device, table=table, remove=True
+                    )
+                    rollback_rc, rollback_output = sh(rollback)
+                    lines.append(
+                        f"[error] route for {address} still selects "
+                        f"{verified_route['dev'] or 'unknown'}; attempted rollback"
+                    )
+                    if rollback_rc != 0:
+                        lines.append(
+                            f"[error] rollback failed: {rollback_output}"
+                        )
+                    continue
+            action = "removed" if remove else "added bypass for"
+            lines.append(
+                f"[ok] {action} {address} via {gateway} dev {device} table {table}"
+            )
+            changed.append(address)
+            if not remove:
+                undo = dns_bypass_route_command(
+                    address, gateway, device, table=table, remove=True
+                )
+                lines.append("[info] undo: " + " ".join(undo))
+        else:
+            lines.append(
+                f"[error] route change failed for {address}: {output}"
+            )
+
+    log_action(
+        ctx,
+        f"ACTION DNS bypass {'removed' if remove else 'added'} for {', '.join(changed)}",
+    )
+    if not remove and changed:
+        lines.append(
+            "[info] temporary route only; wg-quick or network reconfiguration may remove it"
+        )
+    return lines
+
+
 def action_wg_up(ctx):
     log = []
     c = parse_wg_conf(WG_CONF)
@@ -1889,7 +2169,12 @@ Repairs never run on their own: each shows the exact steps and needs 'y'.
 
 DNS RECOVERY
     Actions > Write static resolver backs up the current file or symlink first.
+    Run the DNS route-path check to see whether nameservers use wg0 or eth0.
+    Actions > Route DNS outside wg0 adds temporary, specific IPv4 host routes
+    in the active routing table; it verifies the path and rolls back on failure.
+    Remove DNS bypass routes reverses matching routes.
     It does not mask systemd-resolved, install startup hooks, or edit WireGuard.
+    It never changes AllowedIPs: choose VPN networks deliberately to avoid leaks.
     Service state alone does not prove which process recreates resolv.conf.
     A systemd unit requires systemd as PID 1 and a working system bus.
     /etc/profile.d runs at login-shell startup, not reliably at container boot.
@@ -1925,6 +2210,14 @@ class App:
             (
                 "dns",
                 "Write static DNS to resolv.conf (backup current file or symlink)",
+            ),
+            (
+                "dnsbypass",
+                "Route selected DNS servers outside wg0 (temporary IPv4 routes)",
+            ),
+            (
+                "dnsbypass-clear",
+                "Remove matching temporary DNS bypass routes",
             ),
         ]
         curses.curs_set(0) if hasattr(curses, "curs_set") else None
@@ -2152,6 +2445,8 @@ class App:
             "wgup": "Starts the configured tunnel; if no handshake arrives, direct routing is restored.",
             "import": "Validates and backs up config, then adds full-tunnel routes; source still has its key.",
             "dns": "Writes only after confirmation; backs up the current file or dangling symlink, then tests lookup.",
+            "dnsbypass": "Adds only missing IPv4 /32 routes via the detected physical gateway; prints exact undo commands.",
+            "dnsbypass-clear": "Removes only matching /32 routes via the currently detected physical gateway.",
         }
         self.put(3, 2, hints[self.actions[self.asel][0]])
         for i, (k, d) in enumerate(self.actions):
@@ -2282,6 +2577,54 @@ class App:
                     self.audit.start()
                 except OSError as error:
                     self.view("Static DNS: error", str(error))
+        elif key in ("dnsbypass", "dnsbypass-clear"):
+            _, configured, _ = resolv_state()
+            ipv4_defaults = [
+                address
+                for address in configured
+                if ipaddress.ip_address(address).version == 4
+            ]
+            defaults = ipv4_defaults or ["1.1.1.1", "8.8.8.8"]
+            raw = self.prompt(
+                "IPv4 DNS IPs (comma-separated; blank uses "
+                + ", ".join(defaults)
+                + ")"
+            )
+            try:
+                nameservers = parse_nameservers(raw or ", ".join(defaults))
+            except ValueError as error:
+                self.msg = str(error)
+                return
+            if any(
+                ipaddress.ip_address(address).version != 4
+                for address in nameservers
+            ):
+                self.msg = "DNS bypass currently supports IPv4 addresses only"
+                return
+            remove = key == "dnsbypass-clear"
+            title = (
+                "remove temporary DNS bypass routes"
+                if remove
+                else "route DNS outside wg0"
+            )
+            caution = (
+                "remove only explicit /32 routes matching the detected uplink"
+                if remove
+                else "add only missing /32 routes when the lookup currently uses wg0"
+            )
+            if self.confirm(
+                title,
+                [
+                    f"DNS servers: {', '.join(nameservers)}",
+                    caution,
+                    "AllowedIPs and wg0.conf will not be changed; tunnel stays up",
+                ],
+            ):
+                result = action_dns_bypass(
+                    self.ctx, nameservers, remove=remove
+                )
+                self.view("DNS bypass: result", "\n".join(result))
+                self.audit.start()
 
     def loop(self):
         while True:
@@ -2483,6 +2826,39 @@ def selftest():
     except ValueError:
         valid_dns_input = False
     t("DNS server input rejects hostnames", not valid_dns_input)
+    t(
+        "uplink detection ignores WireGuard defaults",
+        parse_default_uplink(
+            "default via 10.0.0.2 dev wg0\n"
+            "default via 100.115.92.193 dev eth0"
+        )
+        == ("100.115.92.193", "eth0"),
+    )
+    t(
+        "DNS bypass creates a specific route via the physical gateway",
+        dns_bypass_route_command("1.1.1.1", "192.0.2.1", "eth0", table="51820")
+        == [
+            "ip",
+            "-4",
+            "route",
+            "add",
+            "1.1.1.1/32",
+            "via",
+            "192.0.2.1",
+            "dev",
+            "eth0",
+            "table",
+            "51820",
+        ],
+    )
+    t(
+        "WireGuard policy table is detected from not-fwmark rule",
+        parse_wireguard_route_table(
+            "0: from all lookup local\n"
+            "32764: not from all fwmark 0xca6c lookup 51820"
+        )
+        == "51820",
+    )
     with tempfile.TemporaryDirectory() as resolver_dir:
         resolver_path = os.path.join(resolver_dir, "resolv.conf")
         os.symlink("/run/systemd/resolve/stub-resolv.conf", resolver_path)
@@ -2688,6 +3064,36 @@ def selftest():
         t(
             "diagnose blackhole + own-key + unregistered-key",
             len(d) >= 3 and d[0][0] == "FAIL",
+        )
+        dns_route_diagnosis = diagnose(
+            {
+                "dns": Result("dns", "DNS", "FAIL", data={"system_ok": False}),
+                "dnsroutes": Result(
+                    "dnsroutes",
+                    "DNS route path",
+                    "INFO",
+                    data={"through_wg": True},
+                ),
+            }
+        )
+        t(
+            "diagnosis suggests bypass only for failed DNS routed through wg0",
+            any(item[2] == "dnsbypass" for item in dns_route_diagnosis),
+        )
+        working_dns_diagnosis = diagnose(
+            {
+                "dns": Result("dns", "DNS", "OK", data={"system_ok": True}),
+                "dnsroutes": Result(
+                    "dnsroutes",
+                    "DNS route path",
+                    "INFO",
+                    data={"through_wg": True},
+                ),
+            }
+        )
+        t(
+            "working DNS does not trigger bypass recommendation",
+            not any(item[2] == "dnsbypass" for item in working_dns_diagnosis),
         )
         rep = {
             "tool": "t",
