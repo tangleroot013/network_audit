@@ -32,8 +32,18 @@ or skipped checks. Press `R` to rerun the selected check or `r` to rerun all.
 The `systemd-resolved` check reports service state but does not assume that an
 inactive service caused a resolver symlink. The WireGuard check reports any
 `DNS=` setting found in `wg0.conf`. The `dnsroutes` check shows the kernel's
-chosen interface for each configured nameserver; this confirms the routing
-path, not whether the peer can forward DNS.
+chosen interface and source address for each configured nameserver; this
+confirms the selected route, not whether packets or replies reach the resolver.
+The DNS check records UDP and TCP probe outcomes per resolver as well as the
+system resolver result.
+
+If nameservers select a non-WireGuard interface but neither UDP nor TCP DNS
+returns a valid answer, diagnosis reports that no response was observed and
+suggests checking source/return routing, local or host firewall policy, and
+upstream/provider filtering. This does not identify where packets were lost.
+The root-only Firewall check can flag matching in-container drop rules with an
+explicit output interface; it cannot inspect ChromeOS/Termina host firewall
+policy or prove that a matching rule caused the timeout.
 
 For an explicit static-resolver repair, run the TUI as root, open Actions, and
 choose **Write static DNS**. Enter IPv4 or IPv6 resolver addresses, review the

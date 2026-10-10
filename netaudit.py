@@ -604,6 +604,13 @@ def check_dns(ctx):
     udp_ok = sum(1 for n in cands if res[(n, "udp")] == "ok")
     tcp_ok = sum(1 for n in cands if res[(n, "tcp")] == "ok")
     sys_ok = rc == 0 and bool(sysout)
+    probes = {
+        nameserver: {
+            "udp": res[(nameserver, "udp")],
+            "tcp": res[(nameserver, "tcp")],
+        }
+        for nameserver in cands
+    }
     detail = (
         f"system resolver (getent hosts {ctx.name}): {sysout if sys_ok else 'FAILED - ' + sysout}\n\n"
         + "\n".join(rows)
@@ -614,6 +621,7 @@ def check_dns(ctx):
         "tcp_ok": tcp_ok,
         "total": len(cands),
         "in_resolv": ns,
+        "probes": probes,
     }
     summ = f"system {'OK' if sys_ok else 'FAIL'}; raw udp {udp_ok}/{len(cands)}, tcp {tcp_ok}/{len(cands)}"
     return ("OK" if sys_ok else "FAIL"), summ, detail, data
@@ -622,9 +630,11 @@ def check_dns(ctx):
 def parse_route_lookup(output):
     device_match = re.search(r"\bdev\s+(\S+)", output)
     gateway_match = re.search(r"\bvia\s+(\S+)", output)
+    source_match = re.search(r"\bsrc\s+(\S+)", output)
     return {
         "dev": device_match.group(1) if device_match else None,
         "via": gateway_match.group(1) if gateway_match else None,
+        "src": source_match.group(1) if source_match else None,
     }
 
 
@@ -643,6 +653,7 @@ def check_dns_routes(ctx):
                     "nameserver": nameserver,
                     "dev": None,
                     "via": None,
+                    "src": None,
                     "local_stub": False,
                     "error": "invalid nameserver IP",
                 }
@@ -653,13 +664,14 @@ def check_dns_routes(ctx):
         route = (
             parse_route_lookup(output)
             if rc == 0
-            else {"dev": None, "via": None}
+            else {"dev": None, "via": None, "src": None}
         )
         routes.append(
             {
                 "nameserver": nameserver,
                 "dev": route["dev"],
                 "via": route["via"],
+                "src": route["src"],
                 "local_stub": address.is_loopback,
                 "error": output if rc != 0 else None,
             }
@@ -679,9 +691,11 @@ def check_dns_routes(ctx):
                 if route["local_stub"]
                 else (
                     f"via {route['via']} dev {route['dev']}"
+                    + (f" src {route['src']}" if route["src"] else "")
                     if route["via"] and route["dev"]
                     else (
                         f"dev {route['dev']}"
+                        + (f" src {route['src']}" if route["src"] else "")
                         if route["dev"]
                         else f"route lookup failed: {route['error']}"
                     )
@@ -928,6 +942,13 @@ def check_wireguard(ctx):
     return status, summ, "\n".join(lines), data
 
 
+def firewall_output_interface(rule):
+    match = re.search(r'\boifname\s+"?([^"\s]+)', rule)
+    if not match:
+        match = re.search(r"(?:^|\s)-o\s+(\S+)", rule)
+    return match.group(1) if match else None
+
+
 def check_firewall(ctx):
     if not ctx.is_root:
         return "SKIP", "needs root", "", {}
@@ -959,6 +980,11 @@ def check_firewall(ctx):
             if re.search(r"-j (DROP|REJECT)", r)
             and re.search(r"dport (53|51820)", r)
         ]
+    blocking_egress = {}
+    for rule in block:
+        interface = firewall_output_interface(rule)
+        if interface:
+            blocking_egress.setdefault(interface, []).append(rule)
     pol_drop = len(re.findall(r"policy drop", nft)) if rc == 0 else 0
     tables = len(re.findall(r"(?m)^table ", nft)) if rc == 0 else 0
     rules = (
@@ -982,6 +1008,7 @@ def check_firewall(ctx):
         "rules": rules,
         "policy_drop": pol_drop,
         "blocking": block,
+        "blocking_egress": blocking_egress,
     }
     if block:
         return (
@@ -1148,8 +1175,8 @@ CHECK_HINTS = {
     "icmp": "Ping can be filtered; compare with TCP egress before concluding the internet is down.",
     "resolv": "A missing or dangling resolver file can break DNS even when routes are healthy.",
     "resolved": "Service state is context only; confirm who owns resolv.conf before disabling it.",
-    "dns": "Compare system resolution with raw UDP/TCP results to isolate resolver problems.",
-    "dnsroutes": "Shows the kernel-selected interface for each configured nameserver; route path is not proof of DNS reachability.",
+    "dns": "Compare system resolution with each resolver's UDP/TCP response; a route does not prove a reply arrived.",
+    "dnsroutes": "Shows the selected interface and source IP for each nameserver; routing is not proof of delivery.",
     "tcp": "TCP results distinguish outbound connectivity from DNS or ICMP filtering.",
     "https": "This checks the reported Mullvad exit; offline mode intentionally skips it.",
     "wireguard": "Root access reveals config and handshake evidence; inspect it before repairing.",
@@ -1257,6 +1284,7 @@ def diagnose(res):
         dn
         and not dn.get("system_ok")
         and dn.get("udp_ok", 0) == 0
+        and dn.get("tcp_ok", 0) == 0
         and tc.get("p443_ok", 0) > 0
         and rs.get("state") == "ok"
     ):
@@ -1267,6 +1295,53 @@ def diagnose(res):
                 None,
             )
         )
+    configured_nameservers = set(rs.get("nameservers", []))
+    direct_dns_routes = [
+        route
+        for route in dns_routes.get("routes", [])
+        if route.get("nameserver") in configured_nameservers
+        and not route.get("local_stub")
+        and route.get("dev")
+        and route.get("dev") != WG_IF
+    ]
+    probes = dn.get("probes", {})
+    no_dns_responses = [
+        route
+        for route in direct_dns_routes
+        if all(
+            probes.get(route["nameserver"], {}).get(protocol) != "ok"
+            for protocol in ("udp", "tcp")
+        )
+    ]
+    if dn and not dn.get("system_ok") and no_dns_responses:
+        route_summary = "; ".join(
+            f"{route['nameserver']} via {route['dev']}"
+            + (f" src {route['src']}" if route.get("src") else "")
+            for route in no_dns_responses
+        )
+        f.append(
+            (
+                "WARN",
+                "DNS routes select a non-WireGuard interface, but no valid UDP or TCP DNS answer was received. "
+                "This confirms the selected path, not where replies are lost; check source/return routing, local or host firewall, and upstream policy. "
+                + route_summary,
+                None,
+            )
+        )
+        firewall = data_for("firewall").get("blocking_egress", {})
+        matched_rules = [
+            rule
+            for route in no_dns_responses
+            for rule in firewall.get(route["dev"], [])
+        ]
+        if matched_rules:
+            f.append(
+                (
+                    "WARN",
+                    f"Firewall check found {len(matched_rules)} matching DNS/WireGuard drop rule(s) on the selected egress interface; inspect Firewall details.",
+                    None,
+                )
+            )
     if dn and not dn.get("system_ok") and dns_routes.get("through_wg"):
         f.append(
             (
@@ -2170,6 +2245,8 @@ Repairs never run on their own: each shows the exact steps and needs 'y'.
 DNS RECOVERY
     Actions > Write static resolver backs up the current file or symlink first.
     Run the DNS route-path check to see whether nameservers use wg0 or eth0.
+    If eth0 is selected but UDP/TCP probes get no answers, inspect DNS and
+    Firewall details; route selection does not prove delivery or locate drops.
     Actions > Route DNS outside wg0 adds temporary, specific IPv4 host routes
     in the active routing table; it verifies the path and rolls back on failure.
     Remove DNS bypass routes reverses matching routes.
@@ -2852,6 +2929,25 @@ def selftest():
         ],
     )
     t(
+        "route lookup parser captures selected source",
+        parse_route_lookup(
+            "1.1.1.1 via 192.0.2.1 dev eth0 src 192.0.2.25 uid 1000"
+        )
+        == {"dev": "eth0", "via": "192.0.2.1", "src": "192.0.2.25"},
+    )
+    t(
+        "firewall parser reads nftables output interface",
+        firewall_output_interface('oifname "eth0" udp dport 53 drop')
+        == "eth0",
+    )
+    t(
+        "firewall parser reads iptables output interface",
+        firewall_output_interface(
+            "-A OUTPUT -o eth0 -p udp --dport 53 -j DROP"
+        )
+        == "eth0",
+    )
+    t(
         "WireGuard policy table is detected from not-fwmark rule",
         parse_wireguard_route_table(
             "0: from all lookup local\n"
@@ -3094,6 +3190,137 @@ def selftest():
         t(
             "working DNS does not trigger bypass recommendation",
             not any(item[2] == "dnsbypass" for item in working_dns_diagnosis),
+        )
+        physical_path_failure = diagnose(
+            {
+                "resolv": Result(
+                    "resolv",
+                    "resolv.conf",
+                    "OK",
+                    data={"state": "ok", "nameservers": ["1.1.1.1"]},
+                ),
+                "dns": Result(
+                    "dns",
+                    "DNS",
+                    "FAIL",
+                    data={
+                        "system_ok": False,
+                        "udp_ok": 0,
+                        "tcp_ok": 0,
+                        "probes": {
+                            "1.1.1.1": {"udp": "timeout", "tcp": "timeout"}
+                        },
+                    },
+                ),
+                "dnsroutes": Result(
+                    "dnsroutes",
+                    "DNS route path",
+                    "INFO",
+                    data={
+                        "routes": [
+                            {
+                                "nameserver": "1.1.1.1",
+                                "dev": "eth0",
+                                "via": "192.0.2.1",
+                                "src": "192.0.2.25",
+                                "local_stub": False,
+                            }
+                        ],
+                        "through_wg": False,
+                    },
+                ),
+                "tcp": Result("tcp", "TCP", "OK", data={"p443_ok": 2}),
+            }
+        )
+        physical_path_finding = next(
+            item
+            for item in physical_path_failure
+            if "no valid UDP or TCP DNS answer" in item[1]
+        )
+        t(
+            "failed DNS on physical route reports source without overclaiming",
+            "eth0" in physical_path_finding[1]
+            and "src 192.0.2.25" in physical_path_finding[1]
+            and "not where replies are lost" in physical_path_finding[1]
+            and physical_path_finding[2] is None,
+        )
+        udp_only_failure = diagnose(
+            {
+                "resolv": Result(
+                    "resolv",
+                    "resolv.conf",
+                    "OK",
+                    data={"state": "ok", "nameservers": ["1.1.1.1"]},
+                ),
+                "dns": Result(
+                    "dns",
+                    "DNS",
+                    "FAIL",
+                    data={"system_ok": False, "udp_ok": 0, "tcp_ok": 1},
+                ),
+                "tcp": Result("tcp", "TCP", "OK", data={"p443_ok": 1}),
+            }
+        )
+        t(
+            "TCP DNS success prevents all-port-53 diagnosis",
+            not any(
+                "Port 53 is dead to every resolver" in item[1]
+                for item in udp_only_failure
+            ),
+        )
+        firewall_path_failure = diagnose(
+            {
+                "resolv": Result(
+                    "resolv",
+                    "resolv.conf",
+                    "OK",
+                    data={"state": "ok", "nameservers": ["1.1.1.1"]},
+                ),
+                "dns": Result(
+                    "dns",
+                    "DNS",
+                    "FAIL",
+                    data={
+                        "system_ok": False,
+                        "udp_ok": 0,
+                        "tcp_ok": 0,
+                        "probes": {
+                            "1.1.1.1": {"udp": "timeout", "tcp": "timeout"}
+                        },
+                    },
+                ),
+                "dnsroutes": Result(
+                    "dnsroutes",
+                    "DNS route path",
+                    "INFO",
+                    data={
+                        "routes": [
+                            {
+                                "nameserver": "1.1.1.1",
+                                "dev": "eth0",
+                                "local_stub": False,
+                            }
+                        ]
+                    },
+                ),
+                "firewall": Result(
+                    "firewall",
+                    "Firewall",
+                    "WARN",
+                    data={
+                        "blocking_egress": {
+                            "eth0": ['oifname \\"eth0\\" udp dport 53 drop']
+                        }
+                    },
+                ),
+            }
+        )
+        t(
+            "explicit egress firewall match is called out",
+            any(
+                "matching DNS/WireGuard drop rule" in item[1]
+                for item in firewall_path_failure
+            ),
         )
         rep = {
             "tool": "t",
