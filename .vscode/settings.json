@@ -1,3 +1,22 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python.analysis.autoImportCompletions": true,
+    "black-formatter.args": [
+        "--line-length",
+        "79"
+    ],
+    "flake8.args": [
+        "--max-line-length=79",
+        "--extend-ignore=E203,E501"
+    ],
+    "flake8.enabled": true,
+    "editor.rulers": [
+        79
+    ],
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true,
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true
+    }
 }
