@@ -27,6 +27,28 @@ created with mode `0600`; the folder includes a SHA-256 manifest.
 On the main screen, press `f` to cycle through all checks, warnings/failures,
 or skipped checks. Press `R` to rerun the selected check or `r` to rerun all.
 
+## DNS Recovery
+
+The `systemd-resolved` check reports service state but does not assume that an
+inactive service caused a resolver symlink. The WireGuard check reports any
+`DNS=` setting found in `wg0.conf`.
+
+For an explicit static-resolver repair, run the TUI as root, open Actions, and
+choose **Write static DNS**. Enter IPv4 or IPv6 resolver addresses, review the
+confirmation, and the tool backs up the current file or symlink before writing
+a regular `/etc/resolv.conf` with mode `0644`. It then attempts a lookup. It
+does not mask or stop `systemd-resolved`, alter WireGuard configuration, or
+restart the tunnel.
+
+Persistence depends on the container's init setup. A systemd oneshot unit is
+appropriate only when systemd is PID 1 and its bus is reachable. A
+`/etc/profile.d` hook runs when login shells start; it is not a reliable
+container-boot hook and may run repeatedly. Do not install both blindly.
+Before masking `systemd-resolved`, verify that it is present and is actually
+managing the resolver file. Review any WireGuard `DNS=` setting and back up
+`wg0.conf` before changing it; restarting a full-tunnel interface can interrupt
+connectivity.
+
 ## Command Line
 
 ```sh
